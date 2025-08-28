@@ -254,7 +254,7 @@ var ENDPOINTS = {
 };
 var CACHE_TTL = 7200;
 var EMBEDDER_TOKEN = "a1324504534e82593752d3ce669c24bf3eeb6fbce084315eec34d734481b3738";
-var VERCEL_SERVICE_URL = "https://rds-8dnvuf78n-lexs-projects-464a8a93.vercel.app"; // Vercel deployment URL
+var VERCEL_SERVICE_URL = "https://rds-phi.vercel.app"; // Vercel deployment URL
 var REQUEST_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)Chrome/91.0.4472.124Safari/537.36",
   "Referer": "https://rds.live/",
@@ -268,6 +268,32 @@ var REQUEST_HEADERS = {
   "Sec-Fetch-Dest": "empty",
   "Connection": "keep-alive"
 };
+
+// Helper function to process URL through embedder like rdsnew.py
+async function processUrlThroughEmbedder(url) {
+  try {
+    const encodedUrl = encodeURIComponent(url);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const embedderUrl = `${ENDPOINTS.embedder}?source=${encodedUrl}&token=${EMBEDDER_TOKEN}&timestamp=${timestamp}`;
+    
+    const response = await fetch(embedderUrl, {
+      headers: REQUEST_HEADERS,
+      timeout: 15000
+    });
+    
+    if (response.ok) {
+      const html = await response.text();
+      // Extract source URL from HTML like rdsnew.py does
+      const sourceMatch = html.match(/<source[^>]+src="([^"]+\.m3u8[^"]*)"/i);
+      if (sourceMatch && sourceMatch[1]) {
+        return sourceMatch[1];
+      }
+    }
+  } catch (error) {
+    console.log('Embedder processing failed:', error.message);
+  }
+  return url; // Return original URL if embedder fails
+}
 
 // Helper function to call Vercel tokenization service
 async function callVercelTokenizer(url, referer = null) {
@@ -399,8 +425,14 @@ var worker_default = {
 
           const channelReferer = `https://rds.live/${chData.url}/`;
 
-          // Use only Vercel service for token extraction
-          const vercelUrl = await step(`vercel-${tab}`, () => callVercelTokenizer(rdsJson.data, channelReferer));
+          // First process through embedder like rdsnew.py does
+          let processedUrl = rdsJson.data;
+          if (processedUrl.includes('.m3u8')) {
+            processedUrl = await step(`embedder-${tab}`, () => processUrlThroughEmbedder(processedUrl));
+          }
+
+          // Then use Vercel service for token extraction
+          const vercelUrl = await step(`vercel-${tab}`, () => callVercelTokenizer(processedUrl, channelReferer));
           if (vercelUrl) {
             finalUrl = vercelUrl;
             trace.push({ step: `vercel-${tab}-success`, ok: true, url: finalUrl });
@@ -468,7 +500,7 @@ async function refreshNext8Channels(env) {
 __name(refreshNext8Channels, "refreshNext8Channels");
 __name2(refreshNext8Channels, "refreshNext8Channels");
 
-// Modified processSingleChannel to use only Vercel service
+// Modified processSingleChannel to use embedder first, then Vercel service
 async function processSingleChannel(name, data, env) {
   const tokenCacheKey = `token:${data.post_id}`;
   const tabs = ["tab1", "tab2", "tab3"];
@@ -488,8 +520,14 @@ async function processSingleChannel(name, data, env) {
       
       const channelReferer = `https://rds.live/${data.url}/`;
       
-      // Use only Vercel service for token extraction
-      const vercelResult = await callVercelTokenizer(dataJson.data, channelReferer);
+      // First process through embedder like rdsnew.py does
+      let processedUrl = dataJson.data;
+      if (processedUrl.includes('.m3u8')) {
+        processedUrl = await processUrlThroughEmbedder(processedUrl);
+      }
+      
+      // Then use Vercel service for token extraction
+      const vercelResult = await callVercelTokenizer(processedUrl, channelReferer);
       if (vercelResult) {
         let finalUrl = vercelResult;
         // Add remote parameter if not present
@@ -509,7 +547,7 @@ async function processSingleChannel(name, data, env) {
       console.error(`Error processing ${name} tab ${tab}: ${e.message}`);
     }
   }
-  console.warn(`No valid URL found for ${name} using Vercel service`);
+  console.warn(`No valid URL found for ${name} using embedder + Vercel service`);
   return null;
 }
 __name(processSingleChannel, "processSingleChannel");

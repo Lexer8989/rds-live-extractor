@@ -6,8 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 # KV namespace for caching
 [[kv_namespaces]]
 binding = "RDS_CACHE"
-id = "YOUR_KV_NAMESPACE_ID"  # Replace with actual KV namespace ID
-preview_id = "YOUR_KV_PREVIEW_ID"  # Replace with preview namespace ID
+id = "2d108657f24543f484455cc178078006"  # Replace with actual KV namespace ID
+preview_id = "ccdb4b2806fe4f808bb737cb0253418f"  # Replace with preview namespace ID
 
 # Scheduled trigger - runs every 1h45min
 [triggers]
@@ -27,7 +27,7 @@ zone_name = "your-domain.com"
 command = ""
 
 [env.staging]
-name = "rds-live-worker-staging"
+name = "rds-live-extractor-staging"
 vars = { ENVIRONMENT = "staging" }
 
 [[env.staging.kv_namespaces]]

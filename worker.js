@@ -459,11 +459,11 @@ async function processSingleChannel(name, data, env) {
         const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
           dataJson.data
         )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
-        const channelReferer = `https://rds.live/${data.url}/`;
+        const embedOrigin = new URL(ENDPOINTS.embedder).origin;
         const embedRes = await fetch(embedderUrl, {
           headers: {
             "User-Agent": REQUEST_HEADERS["User-Agent"],
-            "Referer": channelReferer,
+            "Referer": embedOrigin,
             "Accept": REQUEST_HEADERS["Accept"],
             "Accept-Language": REQUEST_HEADERS["Accept-Language"]
           }

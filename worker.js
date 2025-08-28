@@ -307,6 +307,7 @@ var worker_default = {
       const allParam = params.get("all");
       const limitParam = params.get("limit");
       const rotateParam = params.get("rotate"); // if true and no filters, advances index like scheduler
+      const purgeParam = params.get("purge"); // if true, delete cache before fetch
       const selection = await selectChannelsForForce(env, {
         names: namesParam,
         category: categoryParam,
@@ -317,6 +318,10 @@ var worker_default = {
       const results = [];
       for (const [name, data] of selection.channels) {
         try {
+          if (purgeParam && purgeParam !== "0" && purgeParam !== "false") {
+            await env.RDS_CACHE.delete(`token:${data.post_id}`);
+            await env.RDS_CACHE.delete(`token_meta:${data.post_id}`);
+          }
           const url2 = await processSingleChannel(name, data, env);
           results.push({ name, ok: !!url2, url: url2 || null });
           await new Promise((r) => setTimeout(r, 250));
@@ -372,42 +377,107 @@ async function refreshNext8Channels(env) {
 __name(refreshNext8Channels, "refreshNext8Channels");
 async function processSingleChannel(name, data, env) {
   const tokenCacheKey = `token:${data.post_id}`;
-  const formData = new URLSearchParams({
-    action: "get_video_source",
-    tab: "tab1",
-    post_id: data.post_id
-  });
-  try {
-    const res = await fetch(ENDPOINTS.rdsAjax, {
-      method: "POST",
-      headers: REQUEST_HEADERS,
-      body: formData
+  const tabs = ["tab1", "tab2", "tab3"];
+  for (const tab of tabs) {
+    const formData = new URLSearchParams({
+      action: "get_video_source",
+      tab,
+      post_id: data.post_id
     });
-    if (!res.ok) throw new Error(`RDS AJAX HTTP ${res.status}`);
-    const dataJson = await res.json();
-    if (!dataJson.success || !dataJson.data || !dataJson.data.includes(".m3u8")) return null;
-    const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
-      dataJson.data
-    )}&token=${EMBEDDER_TOKEN}&timestamp=${EMBEDDER_TS}`;
-    const embedRes = await fetch(embedderUrl, {
-      headers: {
-        "User-Agent": REQUEST_HEADERS["User-Agent"],
-        "Referer": REQUEST_HEADERS["Referer"]
+    try {
+      const res = await fetch(ENDPOINTS.rdsAjax, {
+        method: "POST",
+        headers: REQUEST_HEADERS,
+        body: formData
+      });
+      if (!res.ok) throw new Error(`RDS AJAX HTTP ${res.status}`);
+      const dataJson = await res.json();
+      if (!dataJson.success || !dataJson.data || !dataJson.data.includes(".m3u8")) continue;
+      const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
+        dataJson.data
+      )}&token=${EMBEDDER_TOKEN}&timestamp=${EMBEDDER_TS}`;
+      const channelReferer = `https://rds.live/${data.url}/`;
+      const embedRes = await fetch(embedderUrl, {
+        headers: {
+          "User-Agent": REQUEST_HEADERS["User-Agent"],
+          "Referer": channelReferer
+        }
+      });
+      const embedHtml = await embedRes.text();
+      const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+      let finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
+      const embedOrigin = new URL(ENDPOINTS.embedder).origin;
+
+      // If we still don't have a tokenized URL, try to resolve via redirect (HEAD then lightweight GET)
+      if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
+        try {
+          const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
+          const headRes = await fetch(withRemote, {
+            method: "HEAD",
+            redirect: "follow",
+            headers: {
+              "User-Agent": REQUEST_HEADERS["User-Agent"],
+              "Referer": embedOrigin
+            }
+          });
+          if (headRes && headRes.url && headRes.url.includes(".m3u8") && /[?&]token=/.test(headRes.url)) {
+            finalUrl = headRes.url;
+          } else {
+            const getRes = await fetch(withRemote, {
+              method: "GET",
+              redirect: "follow",
+              headers: {
+                "User-Agent": REQUEST_HEADERS["User-Agent"],
+                "Referer": embedOrigin,
+                "Range": "bytes=0-0"
+              }
+            });
+            if (getRes && getRes.url && getRes.url.includes(".m3u8") && /[?&]token=/.test(getRes.url)) {
+              finalUrl = getRes.url;
+            }
+          }
+        } catch (_) {
+          // ignore and keep the current finalUrl
+        }
       }
-    });
-    const embedHtml = await embedRes.text();
-    const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-    const finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
-    if (finalUrl && finalUrl.includes(".m3u8")) {
-      await env.RDS_CACHE.put(tokenCacheKey, finalUrl, { expirationTtl: CACHE_TTL });
-      await env.RDS_CACHE.put(`token_meta:${data.post_id}`, Date.now().toString(), { expirationTtl: CACHE_TTL });
-      return finalUrl;
+      // Deep inspect playlist to find tokenized child URL
+      if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
+        try {
+          const plRes = await fetch(finalUrl, {
+            headers: {
+              "User-Agent": REQUEST_HEADERS["User-Agent"],
+              "Referer": embedOrigin
+            },
+            redirect: "follow"
+          });
+          const text = await plRes.text();
+          // Look for absolute tokenized URLs
+          let m = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
+          if (!m) {
+            // Look for relative m3u8 lines with token
+            const rel = text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
+            if (rel) {
+              const abs = new URL(rel[0].trim(), finalUrl).toString();
+              m = [abs];
+            }
+          }
+          if (m) {
+            finalUrl = Array.isArray(m) ? (m[1] || m[0]) : m[0];
+          }
+        } catch (_) {
+          // keep finalUrl as is
+        }
+      }
+      if (finalUrl && finalUrl.includes(".m3u8")) {
+        await env.RDS_CACHE.put(tokenCacheKey, finalUrl, { expirationTtl: CACHE_TTL });
+        await env.RDS_CACHE.put(`token_meta:${data.post_id}`, Date.now().toString(), { expirationTtl: CACHE_TTL });
+        return finalUrl;
+      }
+    } catch (e) {
+      // try next tab
     }
-    return null;
-  } catch (e) {
-    console.error(`Token ${name} errore:`, e.message);
-    return null;
   }
+  return null;
 }
 __name(processSingleChannel, "processSingleChannel");
 async function selectChannelsForForce(env, opts) {

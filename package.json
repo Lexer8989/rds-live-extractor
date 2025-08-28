@@ -14,7 +14,7 @@
   },
   "keywords": [
     "cloudflare",
-    "workers", 
+    "workers" 
   ],
   "author": "RDS Live Worker",
   "license": "MIT",

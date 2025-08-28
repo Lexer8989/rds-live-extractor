@@ -1,7 +1,9 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// channels.js
+// worker.js
+var __defProp2 = Object.defineProperty;
+var __name2 = /* @__PURE__ */ __name((target, value) => __defProp2(target, "name", { value, configurable: true }), "__name");
 var channels = {
   "Pro TV HD": { post_id: "1357", url: "pro-tv-hd-8", category: "Generaliste" },
   "Kanal D HD": { post_id: "1376", url: "kanal-d-ro-3", category: "Generaliste" },
@@ -246,8 +248,6 @@ var channels = {
     category: "Stiri"
   }
 };
-
-// worker.js
 var ENDPOINTS = {
   rdsAjax: "https://rds.live/wp-admin/admin-ajax.php",
   embedder: "https://ivanturbinca.com/embed-video2.php"
@@ -301,12 +301,12 @@ var worker_default = {
     }
     if (url.pathname === "/force-refresh") {
       const params = url.searchParams;
-      const namesParam = params.get("names"); // comma-separated channel names
+      const namesParam = params.get("names");
       const categoryParam = params.get("category");
       const allParam = params.get("all");
       const limitParam = params.get("limit");
-      const rotateParam = params.get("rotate"); // if true and no filters, advances index like scheduler
-      const purgeParam = params.get("purge"); // if true, delete cache before fetch
+      const rotateParam = params.get("rotate");
+      const purgeParam = params.get("purge");
       const selection = await selectChannelsForForce(env, {
         names: namesParam,
         category: categoryParam,
@@ -351,25 +351,33 @@ var worker_default = {
       }
       const [chName, chData] = entry;
       const trace = [];
-      async function step(label, fn){
-        try { const r = await fn(); trace.push({ step: label, ok: true }); return r; } catch (e) { trace.push({ step: label, ok: false, error: String(e) }); throw e; }
+      async function step(label, fn) {
+        try {
+          const r = await fn();
+          trace.push({ step: label, ok: true });
+          return r;
+        } catch (e) {
+          trace.push({ step: label, ok: false, error: String(e) });
+          throw e;
+        }
       }
+      __name(step, "step");
       try {
-        const tabs = ["tab1","tab2","tab3"];
+        const tabs = ["tab1", "tab2", "tab3"];
         let finalUrl = null;
         for (const tab of tabs) {
           const formData = new URLSearchParams({ action: "get_video_source", tab, post_id: chData.post_id });
           const rdsRes = await step(`ajax-${tab}`, () => fetch(ENDPOINTS.rdsAjax, { method: "POST", headers: REQUEST_HEADERS, body: formData }));
           const rdsJson = await rdsRes.json();
-          trace.push({ step: `ajax-${tab}-resp`, ok: true, data: rdsJson && rdsJson.data ? (rdsJson.data.slice(0,200)) : null });
-          if (!rdsJson.success || !rdsJson.data || !rdsJson.data.includes('.m3u8')) continue;
-          const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(rdsJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
+          trace.push({ step: `ajax-${tab}-resp`, ok: true, data: rdsJson && rdsJson.data ? rdsJson.data.slice(0, 200) : null });
+          if (!rdsJson.success || !rdsJson.data || !rdsJson.data.includes(".m3u8")) continue;
+          const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(rdsJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1e3)}`;
           const channelReferer = `https://rds.live/${chData.url}/`;
           const embedRes = await step(`embed-${tab}`, () => fetch(embedderUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer } }));
           const embedHtml = await embedRes.text();
-          trace.push({ step: `embed-${tab}-html`, ok: true, length: embedHtml.length, sample: embedHtml.slice(0,300) });
+          trace.push({ step: `embed-${tab}-html`, ok: true, length: embedHtml.length, sample: embedHtml.slice(0, 300) });
           const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-          finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : rdsJson.data;
+          finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? srcMatch[1] || srcMatch[0] : rdsJson.data;
           trace.push({ step: `embed-${tab}-pick`, ok: true, url: finalUrl });
           if (finalUrl && /[?&]token=/.test(finalUrl)) break;
           const embedOrigin = new URL(ENDPOINTS.embedder).origin;
@@ -377,13 +385,21 @@ var worker_default = {
           try {
             const headRes = await step(`head-${tab}`, () => fetch(withRemote, { method: "HEAD", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
             trace.push({ step: `head-${tab}-final`, ok: true, url: headRes.url });
-            if (headRes && headRes.url && /[?&]token=/.test(headRes.url)) { finalUrl = headRes.url; break; }
-          } catch (_) {}
+            if (headRes && headRes.url && /[?&]token=/.test(headRes.url)) {
+              finalUrl = headRes.url;
+              break;
+            }
+          } catch (_) {
+          }
           try {
             const getRes = await step(`get-${tab}`, () => fetch(withRemote, { method: "GET", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin, "Range": "bytes=0-0" } }));
             trace.push({ step: `get-${tab}-final`, ok: true, url: getRes.url, status: getRes.status });
-            if (getRes && getRes.url && /[?&]token=/.test(getRes.url)) { finalUrl = getRes.url; break; }
-          } catch (_) {}
+            if (getRes && getRes.url && /[?&]token=/.test(getRes.url)) {
+              finalUrl = getRes.url;
+              break;
+            }
+          } catch (_) {
+          }
           if (finalUrl && !/[?&]token=/.test(finalUrl)) {
             try {
               const plRes = await step(`plist-${tab}`, () => fetch(finalUrl, { redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
@@ -391,9 +407,16 @@ var worker_default = {
               const abs = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
               const rel = abs ? null : text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
               trace.push({ step: `plist-${tab}-scan`, ok: true, foundAbs: !!abs, foundRel: !!rel });
-              if (abs) { finalUrl = abs[0]; break; }
-              if (rel) { finalUrl = new URL(rel[0].trim(), finalUrl).toString(); break; }
-            } catch (_) {}
+              if (abs) {
+                finalUrl = abs[0];
+                break;
+              }
+              if (rel) {
+                finalUrl = new URL(rel[0].trim(), finalUrl).toString();
+                break;
+              }
+            } catch (_) {
+            }
           }
         }
         return new Response(JSON.stringify({ channel: chName, finalUrl, hasToken: !!(finalUrl && /[?&]token=/.test(finalUrl)), trace }, null, 2), { headers: { "Content-Type": "application/json" } });
@@ -436,85 +459,129 @@ async function refreshNext8Channels(env) {
   await env.RDS_CACHE.put("last_channel_index", newIndex.toString());
 }
 __name(refreshNext8Channels, "refreshNext8Channels");
+__name2(refreshNext8Channels, "refreshNext8Channels");
 async function processSingleChannel(name, data, env) {
   const tokenCacheKey = `token:${data.post_id}`;
   const tabs = ["tab1", "tab2", "tab3"];
+  
   for (const tab of tabs) {
     const formData = new URLSearchParams({
       action: "get_video_source",
       tab,
       post_id: data.post_id
     });
+    
     try {
       const res = await fetch(ENDPOINTS.rdsAjax, {
         method: "POST",
         headers: REQUEST_HEADERS,
         body: formData
       });
+      
       if (!res.ok) throw new Error(`RDS AJAX HTTP ${res.status}`);
+      
       const dataJson = await res.json();
       if (!dataJson.success || !dataJson.data) continue;
+      
       let finalUrl = null;
+      
       if (dataJson.data.includes(".m3u8")) {
+        // URL diretto m3u8 - processalo tramite embedder
         const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
           dataJson.data
         )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
-        const embedOrigin = new URL(ENDPOINTS.embedder).origin;
-        const channelReferer = `https://rds.live/${data.url}/`;
-        const refererCandidates = [null, channelReferer, embedOrigin];
-        for (const ref of refererCandidates) {
-          try {
-            const headers = {
+        
+        try {
+          const embedRes = await fetch(embedderUrl, {
+            headers: {
               "User-Agent": REQUEST_HEADERS["User-Agent"],
+              "Referer": `https://rds.live/${data.url}/`,
               "Accept": REQUEST_HEADERS["Accept"],
               "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-            };
-            if (ref) headers["Referer"] = ref;
-            const embedRes = await fetch(embedderUrl, { headers });
-            const embedHtml = await embedRes.text();
-            const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-            if (srcMatch && (srcMatch[1] || srcMatch[0])) {
-              finalUrl = srcMatch[1] || srcMatch[0];
-              break;
             }
-          } catch (_) {}
+          });
+          
+          if (embedRes.ok) {
+            const embedHtml = await embedRes.text();
+            
+            // Cerca il tag source come fa rdsnew.py
+            const sourceMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i);
+            if (sourceMatch && sourceMatch[1]) {
+              finalUrl = sourceMatch[1];
+              console.log(`Token URL estratto dall'embedder per ${name}: ${finalUrl}`);
+            } else {
+              // Fallback: cerca URL m3u8 direttamente nell'HTML
+              const directMatch = embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+              if (directMatch && directMatch[0]) {
+                finalUrl = directMatch[0];
+                console.log(`Fallback URL m3u8 per ${name}: ${finalUrl}`);
+              } else {
+                // Usa URL originale se nessun match
+                finalUrl = dataJson.data;
+                console.log(`Usando URL originale per ${name}: ${finalUrl}`);
+              }
+            }
+          } else {
+            console.warn(`Embedder failed for ${name}, using original URL`);
+            finalUrl = dataJson.data;
+          }
+        } catch (embedError) {
+          console.warn(`Embedder error for ${name}: ${embedError.message}, using original URL`);
+          finalUrl = dataJson.data;
         }
-        if (!finalUrl) finalUrl = dataJson.data;
       } else {
-        // Handle HTML page sources (e.g., canale-tv.com). Fetch page, try to find iframe or .m3u8.
+        // URL pagina - estrai m3u8 dalla pagina
         const pageUrl = dataJson.data;
-        const pageRes = await fetch(pageUrl, {
-          headers: {
-            "User-Agent": REQUEST_HEADERS["User-Agent"],
-            "Referer": `https://rds.live/${data.url}/`,
-            "Accept": REQUEST_HEADERS["Accept"],
-            "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-          }
-        });
-        const html = await pageRes.text();
-        let m3u = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-        if (!m3u) {
-          const ifm = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-          if (ifm && ifm[1]) {
-            const iframeUrl = new URL(ifm[1], pageUrl).toString();
-            try {
-              const ifrRes = await fetch(iframeUrl, {
-                headers: {
-                  "User-Agent": REQUEST_HEADERS["User-Agent"],
-                  "Referer": pageUrl,
-                  "Accept": REQUEST_HEADERS["Accept"],
-                  "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+        try {
+          const pageRes = await fetch(pageUrl, {
+            headers: {
+              "User-Agent": REQUEST_HEADERS["User-Agent"],
+              "Referer": `https://rds.live/${data.url}/`,
+              "Accept": REQUEST_HEADERS["Accept"],
+              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+            }
+          });
+          
+          if (pageRes.ok) {
+            const html = await pageRes.text();
+            let m3uMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+            
+            if (!m3uMatch) {
+              // Cerca iframe
+              const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+              if (iframeMatch && iframeMatch[1]) {
+                const iframeUrl = new URL(iframeMatch[1], pageUrl).toString();
+                try {
+                  const ifrRes = await fetch(iframeUrl, {
+                    headers: {
+                      "User-Agent": REQUEST_HEADERS["User-Agent"],
+                      "Referer": pageUrl,
+                      "Accept": REQUEST_HEADERS["Accept"],
+                      "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+                    }
+                  });
+                  
+                  if (ifrRes.ok) {
+                    const ifrHtml = await ifrRes.text();
+                    m3uMatch = ifrHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+                  }
+                } catch (ifrError) {
+                  console.warn(`Iframe fetch error for ${name}: ${ifrError.message}`);
                 }
-              });
-              const ifrHtml = await ifrRes.text();
-              m3u = ifrHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-            } catch (_) {}
+              }
+            }
+            
+            if (m3uMatch) {
+              finalUrl = m3uMatch[0];
+            }
           }
+        } catch (pageError) {
+          console.warn(`Page fetch error for ${name}: ${pageError.message}`);
         }
-        if (m3u) finalUrl = m3u[0]; else continue;
       }
+      
+      // Tokenizzazione e fallback per ottenere ?token= e remote=no_check_ip
       const embedOrigin = new URL(ENDPOINTS.embedder).origin;
-      // If we still don't have a tokenized URL, try to resolve via redirect (HEAD then lightweight GET)
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
         try {
           const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
@@ -550,10 +617,9 @@ async function processSingleChannel(name, data, env) {
             }
           }
         } catch (_) {
-          // ignore and keep the current finalUrl
+          // ignore
         }
       }
-      // Deep inspect playlist to find tokenized child URL
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
         try {
           const finalOrigin = new URL(finalUrl).origin;
@@ -568,10 +634,8 @@ async function processSingleChannel(name, data, env) {
             redirect: "follow"
           });
           const text = await plRes.text();
-          // Look for absolute tokenized URLs
           let m = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
           if (!m) {
-            // Look for relative m3u8 lines with token
             const rel = text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
             if (rel) {
               const abs = new URL(rel[0].trim(), finalUrl).toString();
@@ -579,24 +643,34 @@ async function processSingleChannel(name, data, env) {
             }
           }
           if (m) {
-            finalUrl = Array.isArray(m) ? (m[1] || m[0]) : m[0];
+            finalUrl = Array.isArray(m) ? m[1] || m[0] : m[0];
           }
         } catch (_) {
-          // keep finalUrl as is
+          // ignore
         }
       }
+      // Se abbiamo il token ma manca il remote, aggiungilo per compatibilità
+      if (finalUrl && /[?&]token=/.test(finalUrl) && !/[?&]remote=/.test(finalUrl)) {
+        finalUrl = finalUrl + (finalUrl.includes("?") ? "&" : "?") + "remote=no_check_ip";
+      }
+      
+      // Se abbiamo un URL valido, salvalo nella cache
       if (finalUrl && finalUrl.includes(".m3u8")) {
         await env.RDS_CACHE.put(tokenCacheKey, finalUrl, { expirationTtl: CACHE_TTL });
         await env.RDS_CACHE.put(`token_meta:${data.post_id}`, Date.now().toString(), { expirationTtl: CACHE_TTL });
+        console.log(`Cached URL for ${name}: ${finalUrl.substring(0, 100)}...`);
         return finalUrl;
       }
     } catch (e) {
-      // try next tab
+      console.error(`Error processing ${name} tab ${tab}: ${e.message}`);
     }
   }
+  
+  console.warn(`No valid URL found for ${name}`);
   return null;
 }
 __name(processSingleChannel, "processSingleChannel");
+__name2(processSingleChannel, "processSingleChannel");
 async function selectChannelsForForce(env, opts) {
   const allEntries = Object.entries(channels);
   let selected = [];
@@ -614,7 +688,6 @@ async function selectChannelsForForce(env, opts) {
   } else if (opts.all && opts.all !== "false" && opts.all !== "0") {
     selected = allEntries;
   } else {
-    // default to the next rotating batch of 8
     const total = allEntries.length;
     let startIndex = parseInt(await env.RDS_CACHE.get("last_channel_index") || "0");
     if (isNaN(startIndex)) startIndex = 0;
@@ -631,6 +704,7 @@ async function selectChannelsForForce(env, opts) {
   return { channels: selected, advancedIndex };
 }
 __name(selectChannelsForForce, "selectChannelsForForce");
+__name2(selectChannelsForForce, "selectChannelsForForce");
 async function generatePlaylist(env) {
   let playlist = "#EXTM3U\n";
   playlist += `# Aggiornata: ${(/* @__PURE__ */ new Date()).toISOString()}
@@ -650,6 +724,7 @@ ${url}
   return playlist;
 }
 __name(generatePlaylist, "generatePlaylist");
+__name2(generatePlaylist, "generatePlaylist");
 async function getSystemStatus(env) {
   const totalChannels = Object.keys(channels).length;
   const cacheList = await env.RDS_CACHE.list({ prefix: "token:" });
@@ -666,8 +741,8 @@ async function getSystemStatus(env) {
   };
 }
 __name(getSystemStatus, "getSystemStatus");
+__name2(getSystemStatus, "getSystemStatus");
 export {
   worker_default as default
 };
-//# sourceMappingURL=worker.js.map
 //# sourceMappingURL=worker.js.map

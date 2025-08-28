@@ -254,6 +254,7 @@ var ENDPOINTS = {
 };
 var CACHE_TTL = 7200;
 var EMBEDDER_TOKEN = "a1324504534e82593752d3ce669c24bf3eeb6fbce084315eec34d734481b3738";
+var VERCEL_SERVICE_URL = "https://rds-8dnvuf78n-lexs-projects-464a8a93.vercel.app"; // Vercel deployment URL
 var REQUEST_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)Chrome/91.0.4472.124Safari/537.36",
   "Referer": "https://rds.live/",
@@ -267,6 +268,29 @@ var REQUEST_HEADERS = {
   "Sec-Fetch-Dest": "empty",
   "Connection": "keep-alive"
 };
+
+// Helper function to call Vercel tokenization service
+async function callVercelTokenizer(url, referer = null) {
+  try {
+    const params = new URLSearchParams({ url });
+    if (referer) params.append('referer', referer);
+    
+    const response = await fetch(`${VERCEL_SERVICE_URL}/tokenize?${params}`, {
+      headers: REQUEST_HEADERS,
+      timeout: 30000
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      return data.finalUrl;
+    }
+  } catch (error) {
+    console.log('Vercel tokenizer fallback failed:', error.message);
+  }
+  return null;
+}
+__name(callVercelTokenizer, "callVercelTokenizer");
+__name2(callVercelTokenizer, "callVercelTokenizer");
 var worker_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -370,53 +394,108 @@ var worker_default = {
           const rdsRes = await step(`ajax-${tab}`, () => fetch(ENDPOINTS.rdsAjax, { method: "POST", headers: REQUEST_HEADERS, body: formData }));
           const rdsJson = await rdsRes.json();
           trace.push({ step: `ajax-${tab}-resp`, ok: true, data: rdsJson && rdsJson.data ? rdsJson.data.slice(0, 200) : null });
-          if (!rdsJson.success || !rdsJson.data || !rdsJson.data.includes(".m3u8")) continue;
-          const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(rdsJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1e3)}`;
+
+          if (!rdsJson.success || !rdsJson.data) continue;
+
           const channelReferer = `https://rds.live/${chData.url}/`;
-          const embedRes = await step(`embed-${tab}`, () => fetch(embedderUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer } }));
-          const embedHtml = await embedRes.text();
-          trace.push({ step: `embed-${tab}-html`, ok: true, length: embedHtml.length, sample: embedHtml.slice(0, 300) });
-          const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-          finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? srcMatch[1] || srcMatch[0] : rdsJson.data;
-          trace.push({ step: `embed-${tab}-pick`, ok: true, url: finalUrl });
+          let candidateUrl = null;
+          let refererOrigin = null;
+
+          if (rdsJson.data.includes(".m3u8")) {
+            // S1/S2 direct m3u8 via embedder
+            const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(rdsJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1e3)}`;
+            const embedRes = await step(`embed-${tab}`, () => fetch(embedderUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } }));
+            const embedHtml = await embedRes.text();
+            trace.push({ step: `embed-${tab}-html`, ok: true, length: embedHtml.length, sample: embedHtml.slice(0, 300) });
+            const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+            const fileMatch = srcMatch ? null : embedHtml.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+            const escMatch = srcMatch || fileMatch ? null : embedHtml.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
+            if (srcMatch && (srcMatch[1] || srcMatch[0])) {
+              candidateUrl = srcMatch[1] || srcMatch[0];
+            } else if (fileMatch && fileMatch[1]) {
+              candidateUrl = fileMatch[1];
+            } else if (escMatch && escMatch[0]) {
+              candidateUrl = escMatch[0].replace(/\\\\\//g, "/");
+            } else {
+              candidateUrl = rdsJson.data;
+            }
+            trace.push({ step: `embed-${tab}-pick`, ok: true, url: candidateUrl });
+            refererOrigin = new URL(ENDPOINTS.embedder).origin;
+          } else {
+            // S3: page (e.g., canale-tv.com)
+            const pageUrl = rdsJson.data;
+            const pageRes = await step(`page-${tab}`, () => fetch(pageUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } }));
+            const pageHtml = await pageRes.text();
+            trace.push({ step: `page-${tab}-html`, ok: true, length: pageHtml.length, sample: pageHtml.slice(0, 300) });
+            let m = pageHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i) || pageHtml.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+            if (Array.isArray(m) && m[1]) m = [m[1]];
+            if (!m) {
+              const esc = pageHtml.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
+              if (esc) m = [esc[0].replace(/\\\\\//g, "/")];
+            }
+            if (m) {
+              candidateUrl = m[0];
+              refererOrigin = new URL(pageUrl).origin;
+              trace.push({ step: `page-${tab}-pick`, ok: true, url: candidateUrl });
+            } else {
+              const iframeMatch = pageHtml.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+              if (iframeMatch) {
+                const iframeUrl = new URL(iframeMatch[1], pageUrl).toString();
+                const iframeRes = await step(`iframe-${tab}`, () => fetch(iframeUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": pageUrl, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } }));
+                const iframeHtml = await iframeRes.text();
+                trace.push({ step: `iframe-${tab}-html`, ok: true, length: iframeHtml.length, sample: iframeHtml.slice(0, 300) });
+                const srcMatch2 = iframeHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || iframeHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+                const fileMatch2 = srcMatch2 ? null : iframeHtml.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+                const escMatch2 = srcMatch2 || fileMatch2 ? null : iframeHtml.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
+                if (srcMatch2 && (srcMatch2[1] || srcMatch2[0])) {
+                  candidateUrl = srcMatch2[1] || srcMatch2[0];
+                } else if (fileMatch2 && fileMatch2[1]) {
+                  candidateUrl = fileMatch2[1];
+                } else if (escMatch2 && escMatch2[0]) {
+                  candidateUrl = escMatch2[0].replace(/\\\\\//g, "/");
+                }
+                if (candidateUrl) {
+                  refererOrigin = new URL(iframeUrl).origin;
+                  trace.push({ step: `iframe-${tab}-pick`, ok: true, url: candidateUrl });
+                }
+              }
+            }
+          }
+
+          if (!candidateUrl) continue;
+          finalUrl = candidateUrl;
+
           if (finalUrl && /[?&]token=/.test(finalUrl)) break;
-          const embedOrigin = new URL(ENDPOINTS.embedder).origin;
+
           const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
           try {
-            const headRes = await step(`head-${tab}`, () => fetch(withRemote, { method: "HEAD", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
+            const headRes = await step(`head-${tab}`, () => fetch(withRemote, { method: "HEAD", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } }));
             trace.push({ step: `head-${tab}-final`, ok: true, url: headRes.url });
             if (headRes && headRes.url && /[?&]token=/.test(headRes.url)) {
               finalUrl = headRes.url;
               break;
             }
-          } catch (_) {
-          }
+          } catch (_) {}
+
           try {
-            const getRes = await step(`get-${tab}`, () => fetch(withRemote, { method: "GET", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin, "Range": "bytes=0-0" } }));
+            const getRes = await step(`get-${tab}`, () => fetch(withRemote, { method: "GET", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"], "Range": "bytes=0-0" } }));
             trace.push({ step: `get-${tab}-final`, ok: true, url: getRes.url, status: getRes.status });
             if (getRes && getRes.url && /[?&]token=/.test(getRes.url)) {
               finalUrl = getRes.url;
               break;
             }
-          } catch (_) {
-          }
+          } catch (_) {}
+
           if (finalUrl && !/[?&]token=/.test(finalUrl)) {
             try {
-              const plRes = await step(`plist-${tab}`, () => fetch(finalUrl, { redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
+              const plRes = await step(`plist-${tab}`, () => fetch(finalUrl, { redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } }));
               const text = await plRes.text();
               const abs = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
               const rel = abs ? null : text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
               trace.push({ step: `plist-${tab}-scan`, ok: true, foundAbs: !!abs, foundRel: !!rel });
-              if (abs) {
-                finalUrl = abs[0];
-                break;
-              }
-              if (rel) {
-                finalUrl = new URL(rel[0].trim(), finalUrl).toString();
-                break;
-              }
-            } catch (_) {
-            }
+              if (abs) { finalUrl = abs[0]; break; }
+              if (rel) { finalUrl = new URL(rel[0].trim(), finalUrl).toString(); break; }
+            } catch (_) {}
           }
         }
         return new Response(JSON.stringify({ channel: chName, finalUrl, hasToken: !!(finalUrl && /[?&]token=/.test(finalUrl)), trace }, null, 2), { headers: { "Content-Type": "application/json" } });
@@ -425,6 +504,23 @@ var worker_default = {
         return new Response(JSON.stringify({ channel: name, error: String(e), trace }, null, 2), { headers: { "Content-Type": "application/json" } });
       }
     }
+    // Test Vercel integration endpoint
+    if (url.pathname === "/test-vercel") {
+      const testUrl = url.searchParams.get("url") || "https://example.com/test.m3u8";
+      const referer = url.searchParams.get("referer");
+      
+      const vercelResult = await callVercelTokenizer(testUrl, referer);
+      
+      return new Response(JSON.stringify({
+        input: testUrl,
+        vercelResult,
+        hasToken: vercelResult && /[?&]token=/.test(vercelResult),
+        vercelServiceUrl: VERCEL_SERVICE_URL
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    
     return new Response(
       `
       <h1>RDS Live Worker</h1>
@@ -472,200 +568,130 @@ async function processSingleChannel(name, data, env) {
     });
     
     try {
-      const res = await fetch(ENDPOINTS.rdsAjax, {
-        method: "POST",
-        headers: REQUEST_HEADERS,
-        body: formData
-      });
-      
+      const res = await fetch(ENDPOINTS.rdsAjax, { method: "POST", headers: REQUEST_HEADERS, body: formData });
       if (!res.ok) throw new Error(`RDS AJAX HTTP ${res.status}`);
-      
       const dataJson = await res.json();
       if (!dataJson.success || !dataJson.data) continue;
       
       let finalUrl = null;
+      let refererOrigin = null;
+      const channelReferer = `https://rds.live/${data.url}/`;
       
       if (dataJson.data.includes(".m3u8")) {
-        // URL diretto m3u8 - processalo tramite embedder
-        const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
-          dataJson.data
-        )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
-        
+        const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(dataJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1e3)}`;
         try {
-          const embedRes = await fetch(embedderUrl, {
-            headers: {
-              "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": `https://rds.live/${data.url}/`,
-              "Accept": REQUEST_HEADERS["Accept"],
-              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-            }
-          });
-          
+          const embedRes = await fetch(embedderUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } });
           if (embedRes.ok) {
             const embedHtml = await embedRes.text();
-            
-            // Cerca il tag source come fa rdsnew.py
             const sourceMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i);
+            const directMatch = sourceMatch ? null : embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+            const fileMatch = sourceMatch || directMatch ? null : embedHtml.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+            const escMatch = sourceMatch || directMatch || fileMatch ? null : embedHtml.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
             if (sourceMatch && sourceMatch[1]) {
               finalUrl = sourceMatch[1];
-              console.log(`Token URL estratto dall'embedder per ${name}: ${finalUrl}`);
+            } else if (directMatch && directMatch[0]) {
+              finalUrl = directMatch[0];
+            } else if (fileMatch && fileMatch[1]) {
+              finalUrl = fileMatch[1];
+            } else if (escMatch && escMatch[0]) {
+              finalUrl = escMatch[0].replace(/\\\\\//g, "/");
             } else {
-              // Fallback: cerca URL m3u8 direttamente nell'HTML
-              const directMatch = embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-              if (directMatch && directMatch[0]) {
-                finalUrl = directMatch[0];
-                console.log(`Fallback URL m3u8 per ${name}: ${finalUrl}`);
-              } else {
-                // Usa URL originale se nessun match
-                finalUrl = dataJson.data;
-                console.log(`Usando URL originale per ${name}: ${finalUrl}`);
-              }
+              finalUrl = dataJson.data;
             }
+            refererOrigin = new URL(ENDPOINTS.embedder).origin;
           } else {
-            console.warn(`Embedder failed for ${name}, using original URL`);
             finalUrl = dataJson.data;
           }
-        } catch (embedError) {
-          console.warn(`Embedder error for ${name}: ${embedError.message}, using original URL`);
+        } catch (_) {
           finalUrl = dataJson.data;
         }
       } else {
-        // URL pagina - estrai m3u8 dalla pagina
         const pageUrl = dataJson.data;
         try {
-          const pageRes = await fetch(pageUrl, {
-            headers: {
-              "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": `https://rds.live/${data.url}/`,
-              "Accept": REQUEST_HEADERS["Accept"],
-              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-            }
-          });
-          
+          const pageRes = await fetch(pageUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } });
           if (pageRes.ok) {
             const html = await pageRes.text();
-            let m3uMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-            
+            let m3uMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i) || html.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+            if (Array.isArray(m3uMatch) && m3uMatch[1]) m3uMatch = [m3uMatch[1]];
             if (!m3uMatch) {
-              // Cerca iframe
+              const esc = html.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
+              if (esc) m3uMatch = [esc[0].replace(/\\\\\//g, "/")];
+            }
+            if (!m3uMatch) {
               const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
               if (iframeMatch && iframeMatch[1]) {
                 const iframeUrl = new URL(iframeMatch[1], pageUrl).toString();
                 try {
-                  const ifrRes = await fetch(iframeUrl, {
-                    headers: {
-                      "User-Agent": REQUEST_HEADERS["User-Agent"],
-                      "Referer": pageUrl,
-                      "Accept": REQUEST_HEADERS["Accept"],
-                      "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-                    }
-                  });
-                  
+                  const ifrRes = await fetch(iframeUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": pageUrl, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } });
                   if (ifrRes.ok) {
                     const ifrHtml = await ifrRes.text();
-                    m3uMatch = ifrHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+                    let im = ifrHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i) || ifrHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || ifrHtml.match(/(?:file|src)\s*:\s*["']([^"']*\.m3u8[^"']*)["']/i);
+                    if (Array.isArray(im) && im[1]) im = [im[1]];
+                    if (!im) {
+                      const esc2 = ifrHtml.match(/https?:\\\\\/\\\\\/[^"]+\.m3u8[^"]*/i);
+                      if (esc2) im = [esc2[0].replace(/\\\\\//g, "/")];
+                    }
+                    if (im) {
+                      finalUrl = im[0];
+                      refererOrigin = new URL(iframeUrl).origin;
+                    }
                   }
-                } catch (ifrError) {
-                  console.warn(`Iframe fetch error for ${name}: ${ifrError.message}`);
-                }
+                } catch (_) {}
               }
-            }
-            
-            if (m3uMatch) {
+            } else {
               finalUrl = m3uMatch[0];
+              refererOrigin = new URL(pageUrl).origin;
             }
           }
-        } catch (pageError) {
-          console.warn(`Page fetch error for ${name}: ${pageError.message}`);
-        }
+        } catch (_) {}
       }
       
-      // Tokenizzazione e fallback per ottenere ?token= e remote=no_check_ip
-      const embedOrigin = new URL(ENDPOINTS.embedder).origin;
+      // Tokenization attempts using appropriate Referer
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
-        try {
+        // Try Vercel tokenization service first
+        const vercelResult = await callVercelTokenizer(finalUrl, refererOrigin || channelReferer);
+        if (vercelResult && /[?&]token=/.test(vercelResult)) {
+          finalUrl = vercelResult;
+        } else {
+          // Fallback to original tokenization methods
           const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
-          const finalOrigin = new URL(finalUrl).origin;
-          const headRes = await fetch(withRemote, {
-            method: "HEAD",
-            redirect: "follow",
-            headers: {
-              "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": embedOrigin,
-              "Origin": finalOrigin,
-              "Accept": REQUEST_HEADERS["Accept"],
-              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-            }
-          });
-          if (headRes && headRes.url && headRes.url.includes(".m3u8") && /[?&]token=/.test(headRes.url)) {
-            finalUrl = headRes.url;
-          } else {
-            const getRes = await fetch(withRemote, {
-              method: "GET",
-              redirect: "follow",
-              headers: {
-                "User-Agent": REQUEST_HEADERS["User-Agent"],
-                "Referer": embedOrigin,
-                "Origin": finalOrigin,
-                "Accept": REQUEST_HEADERS["Accept"],
-                "Accept-Language": REQUEST_HEADERS["Accept-Language"],
-                "Range": "bytes=0-0"
+          try {
+            const headRes = await fetch(withRemote, { method: "HEAD", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } });
+            if (headRes && headRes.url && /[?&]token=/.test(headRes.url)) {
+              finalUrl = headRes.url;
+            } else {
+              const getRes = await fetch(withRemote, { method: "GET", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"], "Range": "bytes=0-0" } });
+              if (getRes && getRes.url && /[?&]token=/.test(getRes.url)) {
+                finalUrl = getRes.url;
               }
-            });
-            if (getRes && getRes.url && getRes.url.includes(".m3u8") && /[?&]token=/.test(getRes.url)) {
-              finalUrl = getRes.url;
             }
-          }
-        } catch (_) {
-          // ignore
+          } catch (_) {}
         }
       }
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
         try {
-          const finalOrigin = new URL(finalUrl).origin;
-          const plRes = await fetch(finalUrl, {
-            headers: {
-              "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": embedOrigin,
-              "Origin": finalOrigin,
-              "Accept": REQUEST_HEADERS["Accept"],
-              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-            },
-            redirect: "follow"
-          });
+          const plRes = await fetch(finalUrl, { redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": refererOrigin || channelReferer, "Origin": new URL(finalUrl).origin, "Accept": REQUEST_HEADERS["Accept"], "Accept-Language": REQUEST_HEADERS["Accept-Language"] } });
           const text = await plRes.text();
           let m = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
           if (!m) {
             const rel = text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
-            if (rel) {
-              const abs = new URL(rel[0].trim(), finalUrl).toString();
-              m = [abs];
-            }
+            if (rel) m = [new URL(rel[0].trim(), finalUrl).toString()];
           }
-          if (m) {
-            finalUrl = Array.isArray(m) ? m[1] || m[0] : m[0];
-          }
-        } catch (_) {
-          // ignore
-        }
+          if (m) finalUrl = Array.isArray(m) ? (m[1] || m[0]) : m[0];
+        } catch (_) {}
       }
-      // Se abbiamo il token ma manca il remote, aggiungilo per compatibilità
       if (finalUrl && /[?&]token=/.test(finalUrl) && !/[?&]remote=/.test(finalUrl)) {
         finalUrl = finalUrl + (finalUrl.includes("?") ? "&" : "?") + "remote=no_check_ip";
       }
-      
-      // Se abbiamo un URL valido, salvalo nella cache
       if (finalUrl && finalUrl.includes(".m3u8")) {
         await env.RDS_CACHE.put(tokenCacheKey, finalUrl, { expirationTtl: CACHE_TTL });
         await env.RDS_CACHE.put(`token_meta:${data.post_id}`, Date.now().toString(), { expirationTtl: CACHE_TTL });
-        console.log(`Cached URL for ${name}: ${finalUrl.substring(0, 100)}...`);
         return finalUrl;
       }
     } catch (e) {
       console.error(`Error processing ${name} tab ${tab}: ${e.message}`);
     }
   }
-  
   console.warn(`No valid URL found for ${name}`);
   return null;
 }

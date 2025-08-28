@@ -1,5 +1,5 @@
 {
-  "name": "rds-live-worker",
+  "name": "rds-live-extractor",
   "version": "1.0.0",
   "description": "Cloudflare Worker per generazione playlist RDS Live",
   "main": "worker.js",
@@ -29,12 +29,12 @@
   "dependencies": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/rds-live-worker.git"
+    "url": "https://github.com/yourusername/rds-live-extractor.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/rds-live-worker/issues"
+    "url": "https://github.com/yourusername/rds-live-extractor/issues"
   },
-  "homepage": "https://github.com/yourusername/rds-live-worker#readme",
+  "homepage": "https://github.com/yourusername/rds-live-extractor#readme",
   "engines": {
     "node": ">=16.0.0"
   }

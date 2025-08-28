@@ -460,17 +460,26 @@ async function processSingleChannel(name, data, env) {
           dataJson.data
         )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
         const embedOrigin = new URL(ENDPOINTS.embedder).origin;
-        const embedRes = await fetch(embedderUrl, {
-          headers: {
-            "User-Agent": REQUEST_HEADERS["User-Agent"],
-            "Referer": embedOrigin,
-            "Accept": REQUEST_HEADERS["Accept"],
-            "Accept-Language": REQUEST_HEADERS["Accept-Language"]
-          }
-        });
-        const embedHtml = await embedRes.text();
-        const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-        finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
+        const channelReferer = `https://rds.live/${data.url}/`;
+        const refererCandidates = [null, channelReferer, embedOrigin];
+        for (const ref of refererCandidates) {
+          try {
+            const headers = {
+              "User-Agent": REQUEST_HEADERS["User-Agent"],
+              "Accept": REQUEST_HEADERS["Accept"],
+              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+            };
+            if (ref) headers["Referer"] = ref;
+            const embedRes = await fetch(embedderUrl, { headers });
+            const embedHtml = await embedRes.text();
+            const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+            if (srcMatch && (srcMatch[1] || srcMatch[0])) {
+              finalUrl = srcMatch[1] || srcMatch[0];
+              break;
+            }
+          } catch (_) {}
+        }
+        if (!finalUrl) finalUrl = dataJson.data;
       } else {
         // Handle HTML page sources (e.g., canale-tv.com). Fetch page, try to find iframe or .m3u8.
         const pageUrl = dataJson.data;

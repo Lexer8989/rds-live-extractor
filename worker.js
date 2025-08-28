@@ -283,11 +283,41 @@ async function processUrlThroughEmbedder(url) {
     
     if (response.ok) {
       const html = await response.text();
-      // Extract source URL from HTML like rdsnew.py does
-      const sourceMatch = html.match(/<source[^>]+src="([^"]+\.m3u8[^"]*)"/i);
-      if (sourceMatch && sourceMatch[1]) {
-        return sourceMatch[1];
+      
+      // More robust parsing like BeautifulSoup in rdsnew.py
+      // Look for <source> tags with src attribute containing .m3u8
+      const sourceRegex = /<source[^>]*\ssrc=["']([^"']*\.m3u8[^"']*)["'][^>]*>/gi;
+      let match;
+      
+      while ((match = sourceRegex.exec(html)) !== null) {
+        const srcUrl = match[1];
+        if (srcUrl && srcUrl.includes('.m3u8')) {
+          console.log('Embedder extracted URL:', srcUrl);
+          return srcUrl;
+        }
       }
+      
+      // Fallback: try different patterns
+      const fallbackPatterns = [
+        /<source[^>]+src=["']([^"']+)["'][^>]*>/gi,
+        /src=["']([^"']*\.m3u8[^"']*)["']/gi,
+        /"([^"]*\.m3u8[^"]*)"/gi
+      ];
+      
+      for (const pattern of fallbackPatterns) {
+        pattern.lastIndex = 0; // Reset regex
+        while ((match = pattern.exec(html)) !== null) {
+          const candidate = match[1];
+          if (candidate && candidate.includes('.m3u8') && candidate.startsWith('http')) {
+            console.log('Embedder fallback extracted URL:', candidate);
+            return candidate;
+          }
+        }
+      }
+      
+      console.log('No valid .m3u8 URL found in embedder response');
+    } else {
+      console.log('Embedder response not ok:', response.status);
     }
   } catch (error) {
     console.log('Embedder processing failed:', error.message);

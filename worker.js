@@ -253,7 +253,8 @@ var ENDPOINTS = {
   embedder: "https://ivanturbinca.com/embed-video2.php"
 };
 var CACHE_TTL = 7200;
-var EMBEDDER_TOKEN = "a1324504534e82593752d3ce669c24bf3eeb6fbce084315eec34d734481b3738";
+var EMBEDDER_TOKEN = "4ce04ba75d34bfbb6e483ff22eb2dc31bea886fcdbfbbe0a68506dcbc4c9007b";
+var EMBEDDER_TS = 1756358642;
 var REQUEST_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)Chrome/91.0.4472.124Safari/537.36",
   "Referer": "https://rds.live/",
@@ -351,7 +352,7 @@ async function processSingleChannel(name, data, env) {
     if (!dataJson.success || !dataJson.data || !dataJson.data.includes(".m3u8")) return null;
     const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
       dataJson.data
-    )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1e3)}`;
+    )}&token=${EMBEDDER_TOKEN}&timestamp=${EMBEDDER_TS}`;
     const embedRes = await fetch(embedderUrl, {
       headers: {
         "User-Agent": REQUEST_HEADERS["User-Agent"],
@@ -359,8 +360,8 @@ async function processSingleChannel(name, data, env) {
       }
     });
     const embedHtml = await embedRes.text();
-    const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i);
-    const finalUrl = srcMatch && srcMatch[1] ? srcMatch[1] : dataJson.data;
+    const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+    const finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
     if (finalUrl && finalUrl.includes(".m3u8")) {
       await env.RDS_CACHE.put(tokenCacheKey, finalUrl, { expirationTtl: CACHE_TTL });
       await env.RDS_CACHE.put(`token_meta:${data.post_id}`, Date.now().toString(), { expirationTtl: CACHE_TTL });

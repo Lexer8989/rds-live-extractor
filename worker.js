@@ -453,34 +453,70 @@ async function processSingleChannel(name, data, env) {
       });
       if (!res.ok) throw new Error(`RDS AJAX HTTP ${res.status}`);
       const dataJson = await res.json();
-      if (!dataJson.success || !dataJson.data || !dataJson.data.includes(".m3u8")) continue;
-      const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
-        dataJson.data
-      )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
-      const channelReferer = `https://rds.live/${data.url}/`;
-      const embedRes = await fetch(embedderUrl, {
-        headers: {
-          "User-Agent": REQUEST_HEADERS["User-Agent"],
-          "Referer": channelReferer,
-          "Accept": REQUEST_HEADERS["Accept"],
-          "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+      if (!dataJson.success || !dataJson.data) continue;
+      let finalUrl = null;
+      if (dataJson.data.includes(".m3u8")) {
+        const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
+          dataJson.data
+        )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
+        const channelReferer = `https://rds.live/${data.url}/`;
+        const embedRes = await fetch(embedderUrl, {
+          headers: {
+            "User-Agent": REQUEST_HEADERS["User-Agent"],
+            "Referer": channelReferer,
+            "Accept": REQUEST_HEADERS["Accept"],
+            "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+          }
+        });
+        const embedHtml = await embedRes.text();
+        const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+        finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
+      } else {
+        // Handle HTML page sources (e.g., canale-tv.com). Fetch page, try to find iframe or .m3u8.
+        const pageUrl = dataJson.data;
+        const pageRes = await fetch(pageUrl, {
+          headers: {
+            "User-Agent": REQUEST_HEADERS["User-Agent"],
+            "Referer": `https://rds.live/${data.url}/`,
+            "Accept": REQUEST_HEADERS["Accept"],
+            "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+          }
+        });
+        const html = await pageRes.text();
+        let m3u = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+        if (!m3u) {
+          const ifm = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+          if (ifm && ifm[1]) {
+            const iframeUrl = new URL(ifm[1], pageUrl).toString();
+            try {
+              const ifrRes = await fetch(iframeUrl, {
+                headers: {
+                  "User-Agent": REQUEST_HEADERS["User-Agent"],
+                  "Referer": pageUrl,
+                  "Accept": REQUEST_HEADERS["Accept"],
+                  "Accept-Language": REQUEST_HEADERS["Accept-Language"]
+                }
+              });
+              const ifrHtml = await ifrRes.text();
+              m3u = ifrHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+            } catch (_) {}
+          }
         }
-      });
-      const embedHtml = await embedRes.text();
-      const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
-      let finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : dataJson.data;
+        if (m3u) finalUrl = m3u[0]; else continue;
+      }
       const embedOrigin = new URL(ENDPOINTS.embedder).origin;
-
       // If we still don't have a tokenized URL, try to resolve via redirect (HEAD then lightweight GET)
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
         try {
           const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
+          const finalOrigin = new URL(finalUrl).origin;
           const headRes = await fetch(withRemote, {
             method: "HEAD",
             redirect: "follow",
             headers: {
               "User-Agent": REQUEST_HEADERS["User-Agent"],
               "Referer": embedOrigin,
+              "Origin": finalOrigin,
               "Accept": REQUEST_HEADERS["Accept"],
               "Accept-Language": REQUEST_HEADERS["Accept-Language"]
             }
@@ -494,6 +530,7 @@ async function processSingleChannel(name, data, env) {
               headers: {
                 "User-Agent": REQUEST_HEADERS["User-Agent"],
                 "Referer": embedOrigin,
+                "Origin": finalOrigin,
                 "Accept": REQUEST_HEADERS["Accept"],
                 "Accept-Language": REQUEST_HEADERS["Accept-Language"],
                 "Range": "bytes=0-0"
@@ -510,10 +547,12 @@ async function processSingleChannel(name, data, env) {
       // Deep inspect playlist to find tokenized child URL
       if (finalUrl && finalUrl.includes(".m3u8") && !/[?&]token=/.test(finalUrl)) {
         try {
+          const finalOrigin = new URL(finalUrl).origin;
           const plRes = await fetch(finalUrl, {
             headers: {
               "User-Agent": REQUEST_HEADERS["User-Agent"],
               "Referer": embedOrigin,
+              "Origin": finalOrigin,
               "Accept": REQUEST_HEADERS["Accept"],
               "Accept-Language": REQUEST_HEADERS["Accept-Language"]
             },

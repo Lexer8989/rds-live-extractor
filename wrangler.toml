@@ -1,4 +1,4 @@
-name = "rds-live-worker"
+name = "rds-live-extractor"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]

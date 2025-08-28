@@ -300,6 +300,42 @@ var worker_default = {
         { headers: { "Content-Type": "application/json" } }
       );
     }
+    if (url.pathname === "/force-refresh") {
+      const params = url.searchParams;
+      const namesParam = params.get("names"); // comma-separated channel names
+      const categoryParam = params.get("category");
+      const allParam = params.get("all");
+      const limitParam = params.get("limit");
+      const rotateParam = params.get("rotate"); // if true and no filters, advances index like scheduler
+      const selection = await selectChannelsForForce(env, {
+        names: namesParam,
+        category: categoryParam,
+        all: allParam,
+        limit: limitParam,
+        rotate: rotateParam
+      });
+      const results = [];
+      for (const [name, data] of selection.channels) {
+        try {
+          const url2 = await processSingleChannel(name, data, env);
+          results.push({ name, ok: !!url2, url: url2 || null });
+          await new Promise((r) => setTimeout(r, 250));
+        } catch (e) {
+          results.push({ name, ok: false, error: String(e) });
+        }
+      }
+      const body = {
+        totalRequested: selection.channels.length,
+        advancedIndex: selection.advancedIndex,
+        results
+      };
+      return new Response(JSON.stringify(body, null, 2), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
     return new Response(
       `
       <h1>RDS Live Worker</h1>
@@ -374,6 +410,40 @@ async function processSingleChannel(name, data, env) {
   }
 }
 __name(processSingleChannel, "processSingleChannel");
+async function selectChannelsForForce(env, opts) {
+  const allEntries = Object.entries(channels);
+  let selected = [];
+  let advancedIndex = false;
+  const limit = Math.max(0, parseInt(opts.limit || "0") || 0);
+  if (opts.names) {
+    const wanted = opts.names.split(",").map((s) => s.trim()).filter(Boolean);
+    for (const w of wanted) {
+      const match = allEntries.find(([name]) => name.toLowerCase() === w.toLowerCase());
+      if (match) selected.push(match);
+    }
+  } else if (opts.category) {
+    const cat = opts.category.toLowerCase();
+    selected = allEntries.filter(([, data]) => (data.category || "").toLowerCase() === cat);
+  } else if (opts.all && opts.all !== "false" && opts.all !== "0") {
+    selected = allEntries;
+  } else {
+    // default to the next rotating batch of 8
+    const total = allEntries.length;
+    let startIndex = parseInt(await env.RDS_CACHE.get("last_channel_index") || "0");
+    if (isNaN(startIndex)) startIndex = 0;
+    selected = allEntries.slice(startIndex, startIndex + 8);
+    const newIndex = (startIndex + 8) % total;
+    if (opts.rotate && opts.rotate !== "false" && opts.rotate !== "0") {
+      await env.RDS_CACHE.put("last_channel_index", newIndex.toString());
+      advancedIndex = true;
+    }
+  }
+  if (limit > 0 && selected.length > limit) {
+    selected = selected.slice(0, limit);
+  }
+  return { channels: selected, advancedIndex };
+}
+__name(selectChannelsForForce, "selectChannelsForForce");
 async function generatePlaylist(env) {
   let playlist = "#EXTM3U\n";
   playlist += `# Aggiornata: ${(/* @__PURE__ */ new Date()).toISOString()}

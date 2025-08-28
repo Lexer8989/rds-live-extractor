@@ -253,13 +253,12 @@ var ENDPOINTS = {
   embedder: "https://ivanturbinca.com/embed-video2.php"
 };
 var CACHE_TTL = 7200;
-var EMBEDDER_TOKEN = "4ce04ba75d34bfbb6e483ff22eb2dc31bea886fcdbfbbe0a68506dcbc4c9007b";
-var EMBEDDER_TS = 1756358642;
+var EMBEDDER_TOKEN = "a1324504534e82593752d3ce669c24bf3eeb6fbce084315eec34d734481b3738";
 var REQUEST_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)Chrome/91.0.4472.124Safari/537.36",
   "Referer": "https://rds.live/",
-  "Accept": "application/json, text/javascript, */*; q=0.01",
-  "Accept-Language": "en-US,en;q=0.9",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.5",
   "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
   "X-Requested-With": "XMLHttpRequest",
   "Origin": "https://rds.live",
@@ -341,6 +340,68 @@ var worker_default = {
         }
       });
     }
+    if (url.pathname === "/probe") {
+      const name = url.searchParams.get("name");
+      if (!name) {
+        return new Response(JSON.stringify({ error: "Missing ?name" }), { headers: { "Content-Type": "application/json" } });
+      }
+      const entry = Object.entries(channels).find(([n]) => n.toLowerCase() === name.toLowerCase());
+      if (!entry) {
+        return new Response(JSON.stringify({ error: "Channel not found" }), { headers: { "Content-Type": "application/json" } });
+      }
+      const [chName, chData] = entry;
+      const trace = [];
+      async function step(label, fn){
+        try { const r = await fn(); trace.push({ step: label, ok: true }); return r; } catch (e) { trace.push({ step: label, ok: false, error: String(e) }); throw e; }
+      }
+      try {
+        const tabs = ["tab1","tab2","tab3"];
+        let finalUrl = null;
+        for (const tab of tabs) {
+          const formData = new URLSearchParams({ action: "get_video_source", tab, post_id: chData.post_id });
+          const rdsRes = await step(`ajax-${tab}`, () => fetch(ENDPOINTS.rdsAjax, { method: "POST", headers: REQUEST_HEADERS, body: formData }));
+          const rdsJson = await rdsRes.json();
+          trace.push({ step: `ajax-${tab}-resp`, ok: true, data: rdsJson && rdsJson.data ? (rdsJson.data.slice(0,200)) : null });
+          if (!rdsJson.success || !rdsJson.data || !rdsJson.data.includes('.m3u8')) continue;
+          const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(rdsJson.data)}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
+          const channelReferer = `https://rds.live/${chData.url}/`;
+          const embedRes = await step(`embed-${tab}`, () => fetch(embedderUrl, { headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": channelReferer } }));
+          const embedHtml = await embedRes.text();
+          trace.push({ step: `embed-${tab}-html`, ok: true, length: embedHtml.length, sample: embedHtml.slice(0,300) });
+          const srcMatch = embedHtml.match(/<source[^>]+src=["']([^"']*\.m3u8[^"']*)["']/i) || embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+          finalUrl = srcMatch && (srcMatch[1] || srcMatch[0]) ? (srcMatch[1] || srcMatch[0]) : rdsJson.data;
+          trace.push({ step: `embed-${tab}-pick`, ok: true, url: finalUrl });
+          if (finalUrl && /[?&]token=/.test(finalUrl)) break;
+          const embedOrigin = new URL(ENDPOINTS.embedder).origin;
+          const withRemote = finalUrl.includes("?") ? `${finalUrl}&remote=no_check_ip` : `${finalUrl}?remote=no_check_ip`;
+          try {
+            const headRes = await step(`head-${tab}`, () => fetch(withRemote, { method: "HEAD", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
+            trace.push({ step: `head-${tab}-final`, ok: true, url: headRes.url });
+            if (headRes && headRes.url && /[?&]token=/.test(headRes.url)) { finalUrl = headRes.url; break; }
+          } catch (_) {}
+          try {
+            const getRes = await step(`get-${tab}`, () => fetch(withRemote, { method: "GET", redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin, "Range": "bytes=0-0" } }));
+            trace.push({ step: `get-${tab}-final`, ok: true, url: getRes.url, status: getRes.status });
+            if (getRes && getRes.url && /[?&]token=/.test(getRes.url)) { finalUrl = getRes.url; break; }
+          } catch (_) {}
+          if (finalUrl && !/[?&]token=/.test(finalUrl)) {
+            try {
+              const plRes = await step(`plist-${tab}`, () => fetch(finalUrl, { redirect: "follow", headers: { "User-Agent": REQUEST_HEADERS["User-Agent"], "Referer": embedOrigin } }));
+              const text = await plRes.text();
+              const abs = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*token=[^\s"'<>]+/i);
+              const rel = abs ? null : text.match(/^[^#\r\n]*\.m3u8[^\r\n]*token=[^\r\n]*/im);
+              trace.push({ step: `plist-${tab}-scan`, ok: true, foundAbs: !!abs, foundRel: !!rel });
+              if (abs) { finalUrl = abs[0]; break; }
+              if (rel) { finalUrl = new URL(rel[0].trim(), finalUrl).toString(); break; }
+            } catch (_) {}
+          }
+        }
+        return new Response(JSON.stringify({ channel: chName, finalUrl, hasToken: !!(finalUrl && /[?&]token=/.test(finalUrl)), trace }, null, 2), { headers: { "Content-Type": "application/json" } });
+      } catch (e) {
+        trace.push({ step: "error", ok: false, error: String(e) });
+        return new Response(JSON.stringify({ channel: name, error: String(e), trace }, null, 2), { headers: { "Content-Type": "application/json" } });
+      }
+    }
     return new Response(
       `
       <h1>RDS Live Worker</h1>
@@ -395,12 +456,14 @@ async function processSingleChannel(name, data, env) {
       if (!dataJson.success || !dataJson.data || !dataJson.data.includes(".m3u8")) continue;
       const embedderUrl = `${ENDPOINTS.embedder}?source=${encodeURIComponent(
         dataJson.data
-      )}&token=${EMBEDDER_TOKEN}&timestamp=${EMBEDDER_TS}`;
+      )}&token=${EMBEDDER_TOKEN}&timestamp=${Math.floor(Date.now() / 1000)}`;
       const channelReferer = `https://rds.live/${data.url}/`;
       const embedRes = await fetch(embedderUrl, {
         headers: {
           "User-Agent": REQUEST_HEADERS["User-Agent"],
-          "Referer": channelReferer
+          "Referer": channelReferer,
+          "Accept": REQUEST_HEADERS["Accept"],
+          "Accept-Language": REQUEST_HEADERS["Accept-Language"]
         }
       });
       const embedHtml = await embedRes.text();
@@ -417,7 +480,9 @@ async function processSingleChannel(name, data, env) {
             redirect: "follow",
             headers: {
               "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": embedOrigin
+              "Referer": embedOrigin,
+              "Accept": REQUEST_HEADERS["Accept"],
+              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
             }
           });
           if (headRes && headRes.url && headRes.url.includes(".m3u8") && /[?&]token=/.test(headRes.url)) {
@@ -429,6 +494,8 @@ async function processSingleChannel(name, data, env) {
               headers: {
                 "User-Agent": REQUEST_HEADERS["User-Agent"],
                 "Referer": embedOrigin,
+                "Accept": REQUEST_HEADERS["Accept"],
+                "Accept-Language": REQUEST_HEADERS["Accept-Language"],
                 "Range": "bytes=0-0"
               }
             });
@@ -446,7 +513,9 @@ async function processSingleChannel(name, data, env) {
           const plRes = await fetch(finalUrl, {
             headers: {
               "User-Agent": REQUEST_HEADERS["User-Agent"],
-              "Referer": embedOrigin
+              "Referer": embedOrigin,
+              "Accept": REQUEST_HEADERS["Accept"],
+              "Accept-Language": REQUEST_HEADERS["Accept-Language"]
             },
             redirect: "follow"
           });

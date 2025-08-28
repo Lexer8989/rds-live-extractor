@@ -15,10 +15,6 @@
   "keywords": [
     "cloudflare",
     "workers", 
-    "iptv",
-    "m3u",
-    "rds-live",
-    "streaming"
   ],
   "author": "RDS Live Worker",
   "license": "MIT",
